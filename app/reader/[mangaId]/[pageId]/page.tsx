@@ -5,6 +5,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
+import { Slider } from '@/components/ui/slider'
 import { 
   ChevronLeft, 
   ChevronRight, 
@@ -27,39 +28,20 @@ import {
   ZoomOut,
   SkipBack,
   SkipForward,
-  X
+  X,
+  Play,
+  Pause,
+  ScrollText,
+  FlipHorizontal,
+  FlipVertical,
+  BookOpenCheck
 } from 'lucide-react'
 import { getMangaDxChapterPages, getMangaDxChapter, getMangaDxChapters } from '@/lib/mangadx-api'
 import { toast } from 'sonner'
-import dynamic from 'next/dynamic'
-
-// Create a wrapper component for PageFlip
-const PageFlipWrapper = dynamic(
-  () => import('page-flip').then((mod) => {
-    return function PageFlipWrapper({ containerRef, options, onInit, children }: {
-      containerRef: React.RefObject<HTMLDivElement>;
-      options: any;
-      onInit: (pageFlip: any) => void;
-      children: React.ReactNode;
-    }) {
-      useEffect(() => {
-        if (containerRef.current) {
-          const pageFlip = new mod.PageFlip(containerRef.current, options);
-          onInit(pageFlip);
-          return () => {
-            pageFlip.destroy();
-          };
-        }
-      }, [containerRef, options, onInit]);
-      
-      return <div ref={containerRef}>{children}</div>;
-    };
-  }),
-  { ssr: false }
-);
+import Image from 'next/image'
 
 interface ReaderSettings {
-  readingMode: 'single' | 'double' | 'webtoon'
+  readingMode: 'single' | 'double' | 'webtoon' | 'scroll-vertical' | 'scroll-horizontal'
   flipDirection: 'rtl' | 'ltr'
   autoPlay: boolean
   autoPlaySpeed: number
@@ -68,21 +50,25 @@ interface ReaderSettings {
   showUI: boolean
   fullscreen: boolean
   zoom: number
+  autoZoom: boolean
+  fitMode: 'width' | 'height' | 'page' | 'original'
 }
 
 interface PageData {
   url: string
   loaded: boolean
   error: boolean
+  width?: number
+  height?: number
 }
 
 export default function MangaReaderPage() {
   const params = useParams()
   const router = useRouter()
   const searchParams = useSearchParams()
-  const flipBookRef = useRef<HTMLDivElement>(null)
-  const pageFlipRef = useRef<any>(null)
-  const [isClient, setIsClient] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const autoPlayIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
   const mangaId = params.mangaId as string
   const pageId = parseInt(params.pageId as string) || 1
@@ -101,25 +87,22 @@ export default function MangaReaderPage() {
     readingMode: 'single',
     flipDirection: 'rtl',
     autoPlay: false,
-    autoPlaySpeed: 3000,
+    autoPlaySpeed: 10,
     soundEnabled: true,
     preloadPages: 3,
     showUI: true,
     fullscreen: false,
-    zoom: 1
+    zoom: 100,
+    autoZoom: true,
+    fitMode: 'width'
   })
 
   const [showSettings, setShowSettings] = useState(false)
-  const [isFlipping, setIsFlipping] = useState(false)
-
-  // Initialize client-side rendering
-  useEffect(() => {
-    setIsClient(true)
-  }, [])
+  const [isTransitioning, setIsTransitioning] = useState(false)
 
   // Load chapter data
   useEffect(() => {
-    if (!chapterId || !isClient) return
+    if (!chapterId) return
 
     const loadChapterData = async () => {
       try {
@@ -165,170 +148,60 @@ export default function MangaReaderPage() {
     }
 
     loadChapterData()
-  }, [chapterId, mangaId, isClient])
+  }, [chapterId, mangaId])
 
-  // Initialize PageFlip
+  // Auto-play functionality
   useEffect(() => {
-    if (!isClient || !flipBookRef.current || pages.length === 0 || pageFlipRef.current) return
-
-    const initPageFlip = async () => {
-      try {
-        const { PageFlip } = await import('page-flip')
-        
-        const pageFlip = new PageFlip(flipBookRef.current!, {
-          width: window.innerWidth > 768 ? 800 : window.innerWidth - 40,
-          height: window.innerWidth > 768 ? 1130 : window.innerHeight - 200,
-          size: settings.readingMode === 'double' ? 'stretch' : 'fixed',
-          orientation: settings.readingMode === 'webtoon' ? 'portrait' : 'landscape',
-          autoSize: true,
-          maxShadowOpacity: 0.5,
-          showCover: true,
-          mobileScrollSupport: true,
-          clickEventForward: true,
-          usePortrait: settings.readingMode === 'webtoon',
-          startPage: currentPage - 1,
-          drawShadow: true,
-          flippingTime: 600,
-          useMouseEvents: true,
-          swipeDistance: 30,
-          showPageCorners: true,
-          disableFlipByClick: false
-        })
-
-        // Add event listeners
-        pageFlip.on('flip', (e: any) => {
-          setIsFlipping(true)
-          const newPage = e.data + 1
-          setCurrentPage(newPage)
-          
-          if (settings.soundEnabled) {
-            playFlipSound()
-          }
-          
-          // Update URL
-          router.replace(`/reader/${mangaId}/${newPage}?chapter=${chapterId}`, { scroll: false })
-          
-          setTimeout(() => setIsFlipping(false), 600)
-        })
-
-        pageFlip.on('changeOrientation', (e: any) => {
-          pageFlip.updateFromHtml()
-        })
-
-        pageFlipRef.current = pageFlip
-        
-        // Load pages into flipbook
-        loadPagesIntoFlipbook(pageFlip)
-        
-      } catch (error) {
-        console.error('Error initializing PageFlip:', error)
+    if (settings.autoPlay && !loading) {
+      autoPlayIntervalRef.current = setInterval(() => {
+        nextPage()
+      }, settings.autoPlaySpeed * 1000)
+    } else {
+      if (autoPlayIntervalRef.current) {
+        clearInterval(autoPlayIntervalRef.current)
+        autoPlayIntervalRef.current = null
       }
     }
-
-    initPageFlip()
 
     return () => {
-      if (pageFlipRef.current) {
-        pageFlipRef.current.destroy()
-        pageFlipRef.current = null
+      if (autoPlayIntervalRef.current) {
+        clearInterval(autoPlayIntervalRef.current)
       }
     }
-  }, [isClient, pages.length, settings.readingMode])
+  }, [settings.autoPlay, settings.autoPlaySpeed, loading])
 
-  const loadPagesIntoFlipbook = useCallback(async (pageFlip: any) => {
-    if (!pageFlip || pages.length === 0) return
+  // Preload pages
+  useEffect(() => {
+    const preloadPage = (index: number) => {
+      if (index < 0 || index >= pages.length || preloadedPages.has(index)) return
 
-    // Clear existing pages
-    flipBookRef.current!.innerHTML = ''
-
-    for (let i = 0; i < pages.length; i++) {
-      const pageElement = document.createElement('div')
-      pageElement.className = 'page-wrapper'
-      pageElement.style.cssText = `
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: #1a1a1a;
-        position: relative;
-        overflow: hidden;
-      `
-
-      // Create loading placeholder
-      const loadingElement = document.createElement('div')
-      loadingElement.className = 'loading-placeholder'
-      loadingElement.style.cssText = `
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: linear-gradient(45deg, #2a2a2a, #3a3a3a);
-        position: absolute;
-        top: 0;
-        left: 0;
-        z-index: 1;
-      `
-      loadingElement.innerHTML = `
-        <div style="text-align: center; color: #666;">
-          <div style="width: 40px; height: 40px; border: 3px solid #333; border-top: 3px solid #ef4444; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 10px;"></div>
-          <div>Loading page ${i + 1}...</div>
-        </div>
-      `
-
-      const img = document.createElement('img')
-      img.style.cssText = `
-        max-width: 100%;
-        max-height: 100%;
-        object-fit: contain;
-        position: relative;
-        z-index: 2;
-        opacity: 0;
-        transition: opacity 0.3s ease;
-      `
-
+      const img = new window.Image()
       img.onload = () => {
-        loadingElement.style.display = 'none'
-        img.style.opacity = '1'
-        setPages(prev => prev.map((p, idx) => 
-          idx === i ? { ...p, loaded: true } : p
+        setPages(prev => prev.map((p, i) => 
+          i === index ? { ...p, loaded: true, width: img.naturalWidth, height: img.naturalHeight } : p
         ))
+        setPreloadedPages(prev => new Set([...prev, index]))
       }
-
       img.onerror = () => {
-        loadingElement.innerHTML = `
-          <div style="text-align: center; color: #ef4444;">
-            <div style="font-size: 24px; margin-bottom: 10px;">⚠️</div>
-            <div>Failed to load page ${i + 1}</div>
-          </div>
-        `
-        setPages(prev => prev.map((p, idx) => 
-          idx === i ? { ...p, error: true } : p
+        setPages(prev => prev.map((p, i) => 
+          i === index ? { ...p, error: true } : p
         ))
       }
-
-      img.src = pages[i].url
-      img.alt = `Page ${i + 1}`
-
-      pageElement.appendChild(loadingElement)
-      pageElement.appendChild(img)
-      flipBookRef.current!.appendChild(pageElement)
+      img.src = pages[index].url
     }
 
-    // Load pages into PageFlip
-    pageFlip.loadFromHTML(flipBookRef.current!.children)
-    
-    // Navigate to current page
-    if (currentPage > 1) {
-      pageFlip.flip(currentPage - 1)
+    // Preload current page and surrounding pages
+    const startIndex = Math.max(0, currentPage - 1 - settings.preloadPages)
+    const endIndex = Math.min(pages.length, currentPage - 1 + settings.preloadPages + 1)
+
+    for (let i = startIndex; i < endIndex; i++) {
+      preloadPage(i)
     }
-  }, [pages, currentPage])
+  }, [currentPage, pages, settings.preloadPages, preloadedPages])
 
   const playFlipSound = () => {
     if (!settings.soundEnabled) return
     
-    // Create a subtle page flip sound
     const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
     const oscillator = audioContext.createOscillator()
     const gainNode = audioContext.createGain()
@@ -347,24 +220,64 @@ export default function MangaReaderPage() {
   }
 
   const navigateToPage = (page: number) => {
-    if (!pageFlipRef.current || page < 1 || page > totalPages) return
+    if (page < 1 || page > totalPages || isTransitioning) return
     
-    pageFlipRef.current.flip(page - 1)
+    setIsTransitioning(true)
+    setCurrentPage(page)
+    
+    if (settings.soundEnabled) {
+      playFlipSound()
+    }
+    
+    // Update URL
+    router.replace(`/reader/${mangaId}/${page}?chapter=${chapterId}`, { scroll: false })
+    
+    setTimeout(() => setIsTransitioning(false), 300)
   }
 
   const nextPage = () => {
-    if (currentPage < totalPages) {
-      navigateToPage(currentPage + 1)
+    if (settings.readingMode === 'double' && currentPage < totalPages) {
+      // Handle dual page navigation
+      if (currentPage === 1) {
+        navigateToPage(2)
+      } else {
+        const nextPageNum = currentPage + 2
+        if (nextPageNum <= totalPages) {
+          navigateToPage(nextPageNum)
+        } else if (currentPage < totalPages) {
+          navigateToPage(totalPages)
+        } else {
+          nextChapter()
+        }
+      }
     } else {
-      nextChapter()
+      if (currentPage < totalPages) {
+        navigateToPage(currentPage + 1)
+      } else {
+        nextChapter()
+      }
     }
   }
 
   const prevPage = () => {
-    if (currentPage > 1) {
-      navigateToPage(currentPage - 1)
+    if (settings.readingMode === 'double' && currentPage > 1) {
+      // Handle dual page navigation
+      if (currentPage === totalPages && totalPages % 2 === 0) {
+        navigateToPage(currentPage - 1)
+      } else {
+        const prevPageNum = currentPage - 2
+        if (prevPageNum >= 1) {
+          navigateToPage(prevPageNum)
+        } else {
+          navigateToPage(1)
+        }
+      }
     } else {
-      prevChapter()
+      if (currentPage > 1) {
+        navigateToPage(currentPage - 1)
+      } else {
+        prevChapter()
+      }
     }
   }
 
@@ -392,11 +305,34 @@ export default function MangaReaderPage() {
     }
   }
 
-  const toggleReadingMode = () => {
-    const modes = ['single', 'double', 'webtoon'] as const
-    const currentIndex = modes.indexOf(settings.readingMode)
-    const nextMode = modes[(currentIndex + 1) % modes.length]
-    setSettings(prev => ({ ...prev, readingMode: nextMode }))
+  const toggleAutoPlay = () => {
+    setSettings(prev => ({ ...prev, autoPlay: !prev.autoPlay }))
+  }
+
+  const handleZoomChange = (value: number[]) => {
+    setSettings(prev => ({ ...prev, zoom: value[0], autoZoom: false }))
+  }
+
+  const resetZoom = () => {
+    setSettings(prev => ({ ...prev, zoom: 100, autoZoom: true }))
+  }
+
+  // Get pages to display based on reading mode
+  const getPagesToDisplay = () => {
+    if (settings.readingMode === 'double') {
+      if (currentPage === 1) {
+        return [currentPage - 1] // Show only first page
+      } else {
+        // Show current page and previous page as spread
+        const leftPage = currentPage % 2 === 0 ? currentPage - 1 : currentPage
+        const rightPage = leftPage + 1
+        return rightPage <= totalPages ? [leftPage - 1, rightPage - 1] : [leftPage - 1]
+      }
+    } else if (settings.readingMode === 'webtoon' || settings.readingMode === 'scroll-vertical') {
+      return pages.map((_, index) => index) // Show all pages
+    } else {
+      return [currentPage - 1] // Show single page
+    }
   }
 
   // Keyboard navigation
@@ -417,6 +353,22 @@ export default function MangaReaderPage() {
           e.preventDefault()
           settings.flipDirection === 'rtl' ? prevPage() : nextPage()
           break
+        case 'ArrowUp':
+          e.preventDefault()
+          if (settings.readingMode === 'scroll-vertical') {
+            scrollContainerRef.current?.scrollBy(0, -200)
+          } else {
+            prevPage()
+          }
+          break
+        case 'ArrowDown':
+          e.preventDefault()
+          if (settings.readingMode === 'scroll-vertical') {
+            scrollContainerRef.current?.scrollBy(0, 200)
+          } else {
+            nextPage()
+          }
+          break
         case 'f':
         case 'F':
           e.preventDefault()
@@ -427,15 +379,14 @@ export default function MangaReaderPage() {
           e.preventDefault()
           setSettings(prev => ({ ...prev, showUI: !prev.showUI }))
           break
-        case 'm':
-        case 'M':
-          e.preventDefault()
-          toggleReadingMode()
-          break
         case 's':
         case 'S':
           e.preventDefault()
           setShowSettings(!showSettings)
+          break
+        case ' ':
+          e.preventDefault()
+          toggleAutoPlay()
           break
         case 'Escape':
           setShowSettings(false)
@@ -446,14 +397,6 @@ export default function MangaReaderPage() {
     window.addEventListener('keydown', handleKeyPress)
     return () => window.removeEventListener('keydown', handleKeyPress)
   }, [settings, showSettings])
-
-  if (!isClient) {
-    return (
-      <div className="min-h-screen bg-black flex items-center justify-center">
-        <div className="text-white">Loading reader...</div>
-      </div>
-    )
-  }
 
   if (loading) {
     return (
@@ -471,32 +414,10 @@ export default function MangaReaderPage() {
     )
   }
 
+  const pagesToDisplay = getPagesToDisplay()
+
   return (
     <div className="min-h-screen bg-black text-white relative overflow-hidden">
-      {/* Add CSS for animations */}
-      <style jsx global>{`
-        @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-        
-        .page-wrapper {
-          user-select: none;
-          -webkit-user-select: none;
-          -moz-user-select: none;
-          -ms-user-select: none;
-        }
-        
-        .stf__parent {
-          margin: 0 auto;
-          touch-action: pan-x pan-y;
-        }
-        
-        .stf__block {
-          box-shadow: 0 0 20px rgba(0,0,0,0.5);
-        }
-      `}</style>
-
       {/* Top Navigation Bar */}
       {settings.showUI && (
         <div className="absolute top-0 left-0 right-0 z-50 bg-gradient-to-b from-black/80 to-transparent p-4">
@@ -526,6 +447,12 @@ export default function MangaReaderPage() {
                 {settings.readingMode.toUpperCase()}
               </Badge>
               
+              {settings.autoPlay && (
+                <Badge variant="secondary" className="bg-green-600/20 text-green-400">
+                  AUTO {settings.autoPlaySpeed}s
+                </Badge>
+              )}
+              
               <Button
                 variant="ghost"
                 size="icon"
@@ -549,15 +476,131 @@ export default function MangaReaderPage() {
       )}
 
       {/* Main Reader Area */}
-      <div className="flex items-center justify-center min-h-screen p-4">
-        <div 
-          ref={flipBookRef}
-          className="relative"
-          style={{
-            maxWidth: '100vw',
-            maxHeight: '100vh'
-          }}
-        />
+      <div 
+        ref={containerRef}
+        className="flex items-center justify-center min-h-screen p-4"
+        style={{ paddingTop: settings.showUI ? '80px' : '0', paddingBottom: settings.showUI ? '80px' : '0' }}
+      >
+        {settings.readingMode === 'webtoon' || settings.readingMode === 'scroll-vertical' ? (
+          // Vertical scroll mode
+          <div 
+            ref={scrollContainerRef}
+            className="w-full max-w-4xl h-screen overflow-y-auto overflow-x-hidden"
+            style={{ 
+              scrollBehavior: 'smooth',
+              transform: `scale(${settings.zoom / 100})`,
+              transformOrigin: 'top center'
+            }}
+          >
+            {pages.map((page, index) => (
+              <div key={index} className="mb-2 flex justify-center">
+                <div className="relative max-w-full">
+                  {page.loaded ? (
+                    <Image
+                      src={page.url}
+                      alt={`Page ${index + 1}`}
+                      width={page.width || 800}
+                      height={page.height || 1200}
+                      className="max-w-full h-auto"
+                      unoptimized
+                    />
+                  ) : (
+                    <div className="w-full h-96 bg-gray-800 flex items-center justify-center">
+                      <div className="text-center">
+                        <div className="w-8 h-8 border-2 border-red-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+                        <div>Loading page {index + 1}...</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : settings.readingMode === 'scroll-horizontal' ? (
+          // Horizontal scroll mode
+          <div 
+            ref={scrollContainerRef}
+            className="w-screen h-full overflow-x-auto overflow-y-hidden flex"
+            style={{ 
+              scrollBehavior: 'smooth',
+              transform: `scale(${settings.zoom / 100})`,
+              transformOrigin: 'center'
+            }}
+          >
+            {pages.map((page, index) => (
+              <div key={index} className="flex-shrink-0 mr-2 flex items-center">
+                <div className="relative h-full">
+                  {page.loaded ? (
+                    <Image
+                      src={page.url}
+                      alt={`Page ${index + 1}`}
+                      width={page.width || 800}
+                      height={page.height || 1200}
+                      className="h-full w-auto max-h-screen"
+                      unoptimized
+                    />
+                  ) : (
+                    <div className="w-96 h-full bg-gray-800 flex items-center justify-center">
+                      <div className="text-center">
+                        <div className="w-8 h-8 border-2 border-red-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+                        <div>Loading page {index + 1}...</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          // Single/Double page mode
+          <div 
+            className="flex items-center justify-center gap-4"
+            style={{ 
+              transform: `scale(${settings.zoom / 100})`,
+              transformOrigin: 'center',
+              transition: 'transform 0.3s ease'
+            }}
+          >
+            {pagesToDisplay.map((pageIndex) => {
+              const page = pages[pageIndex]
+              if (!page) return null
+
+              return (
+                <div key={pageIndex} className="relative">
+                  {page.loaded ? (
+                    <Image
+                      src={page.url}
+                      alt={`Page ${pageIndex + 1}`}
+                      width={page.width || 800}
+                      height={page.height || 1200}
+                      className={`max-h-screen w-auto ${
+                        settings.fitMode === 'width' ? 'max-w-full' :
+                        settings.fitMode === 'height' ? 'h-screen' :
+                        settings.fitMode === 'page' ? 'max-w-full max-h-screen' :
+                        ''
+                      }`}
+                      unoptimized
+                    />
+                  ) : page.error ? (
+                    <div className="w-96 h-96 bg-gray-800 flex items-center justify-center border border-red-500">
+                      <div className="text-center text-red-400">
+                        <X className="w-8 h-8 mx-auto mb-2" />
+                        <div>Failed to load page {pageIndex + 1}</div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="w-96 h-96 bg-gray-800 flex items-center justify-center">
+                      <div className="text-center">
+                        <div className="w-8 h-8 border-2 border-red-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+                        <div>Loading page {pageIndex + 1}...</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       {/* Bottom Navigation */}
@@ -587,6 +630,15 @@ export default function MangaReaderPage() {
             </div>
 
             <div className="flex items-center gap-4">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={toggleAutoPlay}
+                className={`text-white hover:bg-white/20 ${settings.autoPlay ? 'bg-green-600/20' : ''}`}
+              >
+                {settings.autoPlay ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+              </Button>
+
               <div className="text-center">
                 <div className="text-sm text-gray-400">
                   {currentPage} / {totalPages}
@@ -628,7 +680,7 @@ export default function MangaReaderPage() {
       {/* Settings Panel */}
       {showSettings && (
         <div className="absolute inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <Card className="bg-gray-900 border-gray-700 p-6 max-w-md w-full">
+          <Card className="bg-gray-900 border-gray-700 p-6 max-w-md w-full max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-white">Reader Settings</h3>
               <Button
@@ -641,29 +693,111 @@ export default function MangaReaderPage() {
               </Button>
             </div>
 
-            <div className="space-y-4">
+            <div className="space-y-6">
+              {/* Reading Mode */}
               <div>
-                <label className="text-sm font-medium text-gray-300 mb-2 block">
+                <label className="text-sm font-medium text-gray-300 mb-3 block">
                   Reading Mode
                 </label>
-                <div className="flex gap-2">
-                  {(['single', 'double', 'webtoon'] as const).map((mode) => (
-                    <Button
-                      key={mode}
-                      variant={settings.readingMode === mode ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setSettings(prev => ({ ...prev, readingMode: mode }))}
-                      className="flex-1"
-                    >
-                      {mode === 'single' && <Smartphone className="w-4 h-4 mr-1" />}
-                      {mode === 'double' && <Monitor className="w-4 h-4 mr-1" />}
-                      {mode === 'webtoon' && <BookOpen className="w-4 h-4 mr-1" />}
-                      {mode.charAt(0).toUpperCase() + mode.slice(1)}
-                    </Button>
-                  ))}
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { value: 'single', label: 'Single', icon: Smartphone },
+                    { value: 'double', label: 'Double', icon: Monitor },
+                    { value: 'webtoon', label: 'Webtoon', icon: ScrollText },
+                    { value: 'scroll-vertical', label: 'Scroll V', icon: FlipVertical },
+                    { value: 'scroll-horizontal', label: 'Scroll H', icon: FlipHorizontal }
+                  ].map((mode) => {
+                    const Icon = mode.icon
+                    return (
+                      <Button
+                        key={mode.value}
+                        variant={settings.readingMode === mode.value ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => setSettings(prev => ({ ...prev, readingMode: mode.value as any }))}
+                        className="flex flex-col gap-1 h-auto py-2"
+                      >
+                        <Icon className="w-4 h-4" />
+                        <span className="text-xs">{mode.label}</span>
+                      </Button>
+                    )
+                  })}
                 </div>
               </div>
 
+              {/* Zoom Controls */}
+              <div>
+                <label className="text-sm font-medium text-gray-300 mb-3 block">
+                  Zoom: {settings.zoom}%
+                </label>
+                <div className="space-y-3">
+                  <Slider
+                    value={[settings.zoom]}
+                    onValueChange={handleZoomChange}
+                    min={50}
+                    max={300}
+                    step={10}
+                    className="w-full"
+                  />
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleZoomChange([settings.zoom - 10])}
+                      className="flex-1"
+                    >
+                      <ZoomOut className="w-4 h-4 mr-1" />
+                      -
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={resetZoom}
+                      className="flex-1"
+                    >
+                      Reset
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleZoomChange([settings.zoom + 10])}
+                      className="flex-1"
+                    >
+                      <ZoomIn className="w-4 h-4 mr-1" />
+                      +
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Auto Play */}
+              <div>
+                <label className="text-sm font-medium text-gray-300 mb-3 block">
+                  Auto Play: {settings.autoPlaySpeed}s
+                </label>
+                <div className="space-y-3">
+                  <Slider
+                    value={[settings.autoPlaySpeed]}
+                    onValueChange={(value) => setSettings(prev => ({ ...prev, autoPlaySpeed: value[0] }))}
+                    min={3}
+                    max={180}
+                    step={1}
+                    className="w-full"
+                  />
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-gray-400">Auto Play</span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={toggleAutoPlay}
+                      className={`text-gray-400 hover:text-white ${settings.autoPlay ? 'text-green-400' : ''}`}
+                    >
+                      {settings.autoPlay ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Reading Direction */}
               <div>
                 <label className="text-sm font-medium text-gray-300 mb-2 block">
                   Reading Direction
@@ -688,28 +822,31 @@ export default function MangaReaderPage() {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-gray-300">Sound Effects</span>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => setSettings(prev => ({ ...prev, soundEnabled: !prev.soundEnabled }))}
-                  className="text-gray-400 hover:text-white"
-                >
-                  {settings.soundEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
-                </Button>
-              </div>
+              {/* Other Settings */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-gray-300">Sound Effects</span>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setSettings(prev => ({ ...prev, soundEnabled: !prev.soundEnabled }))}
+                    className="text-gray-400 hover:text-white"
+                  >
+                    {settings.soundEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
+                  </Button>
+                </div>
 
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-gray-300">Fullscreen</span>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={toggleFullscreen}
-                  className="text-gray-400 hover:text-white"
-                >
-                  {settings.fullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
-                </Button>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-gray-300">Fullscreen</span>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={toggleFullscreen}
+                    className="text-gray-400 hover:text-white"
+                  >
+                    {settings.fullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
+                  </Button>
+                </div>
               </div>
             </div>
 
@@ -718,7 +855,8 @@ export default function MangaReaderPage() {
                 <div>• Use arrow keys or A/D to navigate</div>
                 <div>• Press F for fullscreen</div>
                 <div>• Press H to hide/show UI</div>
-                <div>• Press M to change reading mode</div>
+                <div>• Press Space for auto-play</div>
+                <div>• Press S for settings</div>
               </div>
             </div>
           </Card>
@@ -726,7 +864,7 @@ export default function MangaReaderPage() {
       )}
 
       {/* Loading Overlay */}
-      {isFlipping && (
+      {isTransitioning && (
         <div className="absolute inset-0 z-40 pointer-events-none">
           <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
             <div className="w-8 h-8 border-2 border-red-500 border-t-transparent rounded-full animate-spin"></div>
